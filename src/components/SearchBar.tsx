@@ -178,9 +178,8 @@ export function SearchBar({
             onFocus={() => setShowSuggestions(true)}
             placeholder={placeholder}
             className={`
-              pl-10 pr-20 h-12 text-base border-2 
-              transition-all duration-200
-              ${showSuggestions ? 'rounded-b-none border-b-0' : ''}
+              pl-10 pr-20 !h-12 min-h-12 text-base 
+              ${showSuggestions ? 'rounded-b-none !border-b-0' : ''}
             `}
             disabled={isLoading}
           />
@@ -256,7 +255,7 @@ export function SearchBar({
 
               {/* 検索履歴 */}
               {searchHistory.length > 0 && query.trim().length <= 1 && (
-                <div className="border-b border-gray-100 last:border-b-0">
+                <div className=" border-b border-gray-100 last:border-b-0">
                   <div className="px-4 py-2 text-xs font-medium text-[color:var(--text-muted)] bg-gray-50 flex items-center">
                     <History className="w-3 h-3 mr-2" />
                     最近の検索

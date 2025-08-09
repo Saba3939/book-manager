@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useUser } from '@clerk/nextjs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Badge } from '@/components/ui/badge';
+
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { SearchBar } from '@/components/SearchBar';
 import { BookCard } from '@/components/BookCard';
@@ -23,7 +23,7 @@ import {
   CheckCircle
 } from 'lucide-react';
 import { getGoogleBooksAPI, convertGoogleBooksVolumeToBook, type GoogleBooksVolume, type Book } from '@/lib/google-books';
-import { useBookService } from '@/lib/book-service';
+import { useBookService, type DuplicateSearchResult } from '@/lib/book-service';
 import Link from 'next/link';
 
 // プラットフォームオプション
@@ -42,7 +42,6 @@ export default function AddBookPage() {
   const bookService = useBookService();
 
   // 検索関連の状態
-  const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<GoogleBooksVolume[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -68,8 +67,9 @@ export default function AddBookPage() {
   });
 
   // 重複チェックの状態
-  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [duplicates, setDuplicates] = useState<DuplicateSearchResult[]>([]);
   const [showDuplicateWarning, setShowDuplicateWarning] = useState(false);
+  const [isDuplicateChecking, setIsDuplicateChecking] = useState(false);
 
   // Google Books検索
   const handleSearch = async (query: string) => {
@@ -104,19 +104,44 @@ export default function AddBookPage() {
     setAddError('');
     setAddSuccess('');
 
-    // 重複チェック
+    // 詳細な重複チェック
+    await performDuplicateCheck({
+      title: volume.volumeInfo.title || '',
+      authors: volume.volumeInfo.authors || [],
+      isbn10: volume.volumeInfo.industryIdentifiers?.find(id => id.type === 'ISBN_10')?.identifier,
+      isbn13: volume.volumeInfo.industryIdentifiers?.find(id => id.type === 'ISBN_13')?.identifier,
+      googleBooksId: volume.id
+    });
+  };
+
+  // 重複チェックを実行する関数
+  const performDuplicateCheck = async (bookData: {
+    title: string;
+    authors: string[];
+    isbn10?: string;
+    isbn13?: string;
+    googleBooksId?: string;
+  }) => {
+    setIsDuplicateChecking(true);
     try {
-      const bookData = convertGoogleBooksVolumeToBook(volume, bookFormat, selectedPlatform);
-      const existingBooks = await bookService.checkDuplicate(bookData.title, bookData.authors);
+      const duplicateResults = await bookService.findPotentialDuplicates(bookData, {
+        minMatchScore: 60, // より広範囲に重複を検索
+        maxResults: 5
+      });
       
-      if (existingBooks.length > 0) {
-        setDuplicates(existingBooks);
+      if (duplicateResults.length > 0) {
+        setDuplicates(duplicateResults);
         setShowDuplicateWarning(true);
       } else {
+        setDuplicates([]);
         setShowDuplicateWarning(false);
       }
     } catch (error) {
       console.error('Duplicate check error:', error);
+      setDuplicates([]);
+      setShowDuplicateWarning(false);
+    } finally {
+      setIsDuplicateChecking(false);
     }
   };
 
@@ -182,6 +207,26 @@ export default function AddBookPage() {
       description: '',
       isbn: '',
       pageCount: '',
+    });
+  };
+
+  // 手動入力時の重複チェック（タイトルと著者が入力された時）
+  const checkManualFormDuplicates = async () => {
+    if (!manualForm.title.trim()) {
+      setDuplicates([]);
+      setShowDuplicateWarning(false);
+      return;
+    }
+
+    const authorsArray = manualForm.authors.split(',').map(a => a.trim()).filter(a => a);
+    const isbnNormalized = manualForm.isbn.replace(/[^0-9]/g, '');
+    
+    await performDuplicateCheck({
+      title: manualForm.title,
+      authors: authorsArray,
+      isbn10: isbnNormalized.length === 10 ? manualForm.isbn : undefined,
+      isbn13: isbnNormalized.length === 13 ? manualForm.isbn : undefined,
+      googleBooksId: undefined
     });
   };
 
@@ -334,35 +379,85 @@ export default function AddBookPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* 重複警告 */}
-              {showDuplicateWarning && duplicates.length > 0 && (
+              {/* 重複チェック中の表示 */}
+              {isDuplicateChecking && (
+                <Alert className="border-blue-200 bg-blue-50">
+                  <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                  <AlertDescription className="text-blue-700">
+                    重複する本がないかチェック中...
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {/* 改良された重複警告 */}
+              {showDuplicateWarning && duplicates.length > 0 && !isDuplicateChecking && (
                 <Alert className="border-[color:var(--warning)] bg-yellow-50">
                   <AlertTriangle className="w-4 h-4 text-[color:var(--warning)]" />
                   <AlertDescription>
-                    <div className="text-[color:var(--warning)] mb-2">
-                      同じタイトルの本が既に登録されています：
+                    <div className="text-[color:var(--warning)] font-medium mb-3">
+                      類似する本が{duplicates.length}件見つかりました
                     </div>
-                    <ul className="text-sm text-[color:var(--text-secondary)] space-y-1">
-                      {duplicates.map((dup, index) => (
-                        <li key={index}>
-                          • {dup.title} ({dup.format === 'digital' ? dup.platform : '物理本'})
-                        </li>
+                    <div className="space-y-3">
+                      {duplicates.map((duplicate, index) => (
+                        <div key={index} className="bg-white rounded-lg p-3 border">
+                          <div className="flex items-start space-x-3">
+                            <div className="flex-shrink-0">
+                              <div className="w-8 h-8 bg-yellow-100 rounded-full flex items-center justify-center">
+                                <span className="text-yellow-600 font-bold text-sm">
+                                  {duplicate.matchScore}%
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium text-gray-900 truncate">
+                                {duplicate.book.title}
+                              </div>
+                              <div className="text-sm text-gray-600 mt-1">
+                                著者: {duplicate.book.authors?.join(', ') || '不明'}
+                              </div>
+                              <div className="text-sm text-gray-600">
+                                形式: {duplicate.book.format === 'digital' 
+                                  ? `電子書籍 (${duplicate.book.platform})` 
+                                  : '物理本'
+                                }
+                              </div>
+                              <div className="flex flex-wrap gap-1 mt-2">
+                                {duplicate.matchReasons.map((reason, reasonIndex) => (
+                                  <span 
+                                    key={reasonIndex}
+                                    className="inline-flex items-center px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700"
+                                  >
+                                    {reason.details}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       ))}
-                    </ul>
-                    <div className="mt-3">
+                    </div>
+                    <div className="flex items-center space-x-2 mt-4 pt-3 border-t">
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={() => handleAddBook(true)}
                         disabled={isAdding}
-                        className="mr-2"
+                        className="bg-yellow-50 border-yellow-300 text-yellow-700 hover:bg-yellow-100"
                       >
-                        それでも追加
+                        {isAdding ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            追加中...
+                          </>
+                        ) : (
+                          'それでも追加する'
+                        )}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
                         onClick={() => setShowDuplicateWarning(false)}
+                        className="text-gray-600"
                       >
                         キャンセル
                       </Button>
@@ -379,7 +474,15 @@ export default function AddBookPage() {
                     <Input
                       id="title"
                       value={manualForm.title}
-                      onChange={(e) => setManualForm({ ...manualForm, title: e.target.value })}
+                      onChange={(e) => {
+                        setManualForm({ ...manualForm, title: e.target.value });
+                        // タイトル入力後、少し遅延して重複チェック
+                        setTimeout(() => {
+                          if (e.target.value.trim()) {
+                            checkManualFormDuplicates();
+                          }
+                        }, 500);
+                      }}
                       placeholder="本のタイトルを入力"
                       required
                     />
@@ -390,7 +493,15 @@ export default function AddBookPage() {
                     <Input
                       id="authors"
                       value={manualForm.authors}
-                      onChange={(e) => setManualForm({ ...manualForm, authors: e.target.value })}
+                      onChange={(e) => {
+                        setManualForm({ ...manualForm, authors: e.target.value });
+                        // 著者入力後、少し遅延して重複チェック
+                        setTimeout(() => {
+                          if (manualForm.title.trim()) {
+                            checkManualFormDuplicates();
+                          }
+                        }, 500);
+                      }}
                       placeholder="著者名（複数の場合はカンマ区切り）"
                     />
                   </div>

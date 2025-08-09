@@ -81,9 +81,17 @@ p {
 }
 
 /* フォーカス状態の改善 */
+/* デフォルトのアウトラインは保持しつつ、フォームコントロールはコンポーネント側のリングを使用 */
 *:focus-visible {
   outline: 2px solid var(--color-ring);
   outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: none;
 }
 
 /* BookManager専用のカスタムプロパティ */
