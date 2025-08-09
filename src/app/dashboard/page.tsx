@@ -35,6 +35,12 @@ export default function DashboardPage() {
   const [recentBooks, setRecentBooks] = useState<Book[]>([]);
   const [isLoadingRecentBooks, setIsLoadingRecentBooks] = useState(true);
   
+  // 検索結果の状態
+  const [searchResults, setSearchResults] = useState<Book[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState('');
+  
   // 認証状態をコンソールで確認
   console.log('Clerk user:', user?.id);
   console.log('Clerk isLoaded:', isLoaded);
@@ -117,11 +123,40 @@ export default function DashboardPage() {
     }
   }, [isLoaded, isSignedIn, user?.id, loadStats, loadRecentBooks]);
 
-  const handleSearch = (e: React.FormEvent) => {
+  const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (searchQuery.trim()) {
-      // TODO: 検索機能を実装
-      console.log('検索:', searchQuery);
+    if (!searchQuery.trim() || !user || !supabaseClient) return;
+    
+    setIsSearching(true);
+    setSearchError('');
+    setSearchResults([]);
+    
+    try {
+      const { BookService } = await import('@/lib/book-service');
+      const bookService = new BookService(user.id, supabaseClient);
+      
+      // タイトルまたは著者での検索
+      const searchOptions: BookSearchOptions = {
+        query: searchQuery.trim(),
+        sortBy: 'created_at',
+        sortOrder: 'desc',
+        limit: 20
+      };
+      
+      const bookRows = await bookService.searchBooks(searchOptions);
+      const convertedBooks = bookRows.map(convertBookRowToBook);
+      
+      setSearchResults(convertedBooks);
+      setHasSearched(true);
+      
+      if (convertedBooks.length === 0) {
+        setSearchError('検索結果が見つかりませんでした');
+      }
+    } catch (err) {
+      console.error('検索エラー:', err);
+      setSearchError('検索中にエラーが発生しました');
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -216,19 +251,20 @@ export default function DashboardPage() {
               <div className="flex-1">
                 <Input
                   type="text"
-                  placeholder="本のタイトルや著者名で検索..."
+                  placeholder="購入前に重複チェック！本のタイトルや著者名で検索..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="h-12 text-lg border-2 focus:border-[color:var(--primary)]"
+                  className="h-12 text-lg"
                 />
               </div>
               <Button 
                 type="submit"
                 size="lg"
-                className="h-12 px-6 bg-[color:var(--primary)] hover:bg-[color:var(--primary-hover)]"
+                className="h-12 px-6 bg-[color:var(--primary)] hover:bg-[color:var(--primary-hover)] text-white"
+                disabled={isSearching}
               >
                 <Search className="w-5 h-5 mr-2" />
-                検索
+                {isSearching ? '検索中...' : '重複チェック'}
               </Button>
             </form>
             <p className="text-sm text-[color:var(--text-muted)] mt-3">
@@ -237,6 +273,96 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
+        {hasSearched && (
+          <Card className="shadow-lg mb-8">
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Search className="w-5 h-5" />
+                <span>検索結果</span>
+                {searchResults.length > 0 && (
+                  <span className="text-sm font-normal text-[color:var(--text-secondary)]">
+                    ({searchResults.length}件)
+                  </span>
+                )}
+              </CardTitle>
+              <CardDescription>
+                「{searchQuery}」の検索結果
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {isSearching ? (
+                <div className="text-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[color:var(--primary)] mx-auto"></div>
+                  <p className="mt-2 text-sm text-[color:var(--text-secondary)]">検索中...</p>
+                </div>
+              ) : searchError ? (
+                <div className="text-center py-12 text-[color:var(--text-secondary)]">
+                  <Search className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                  <p className="text-lg mb-2">{searchError}</p>
+                  <p className="text-sm mb-4">別のキーワードで試してみてください</p>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => {
+                      setHasSearched(false);
+                      setSearchQuery('');
+                      setSearchError('');
+                    }}
+                  >
+                    検索をクリア
+                  </Button>
+                </div>
+              ) : searchResults.length === 0 ? (
+                <div className="text-center py-12 text-[color:var(--text-secondary)]">
+                  <Search className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                  <p className="text-lg mb-2">該当する本が見つかりませんでした</p>
+                  <p className="text-sm mb-4">
+                    この本はまだ登録されていないようです
+                  </p>
+                  <div className="space-y-2">
+                    <Link href="/books/add">
+                      <Button className="bg-[color:var(--primary)] hover:bg-[color:var(--primary-hover)]">
+                        新しく本を追加
+                      </Button>
+                    </Link>
+                    <Button 
+                      variant="outline" 
+                      onClick={() => {
+                        setHasSearched(false);
+                        setSearchQuery('');
+                      }}
+                    >
+                      検索をクリア
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-green-800 text-sm">
+                      ✅ <strong>{searchResults.length}件</strong>の本が見つかりました。既に所有している本です！
+                    </p>
+                  </div>
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+                    {searchResults.map((book) => (
+                      <BookCard key={book.id} book={book} isOwned={true} />
+                    ))}
+                  </div>
+                  <div className="text-center pt-4 border-t">
+                    <Button 
+                      variant="outline"
+                      onClick={() => {
+                        setHasSearched(false);
+                        setSearchQuery('');
+                      }}
+                    >
+                      検索をクリア
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
         {/* アクションカード */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
           {/* 本を追加 */}
@@ -344,6 +470,8 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </div>
+
+        {/* 検索結果 */}
 
         {/* 最近追加した本 */}
         <Card className="shadow-lg">

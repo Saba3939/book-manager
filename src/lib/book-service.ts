@@ -41,7 +41,104 @@ export interface PlatformStats {
   bookCount: number;
 }
 
+// 重複検索の結果と詳細情報
+export interface DuplicateSearchResult {
+  book: BookRow;
+  matchScore: number; // 0-100の重複度スコア
+  matchReasons: DuplicateMatchReason[];
+}
+
+export interface DuplicateMatchReason {
+  type: 'title_exact' | 'title_similarity' | 'author_match' | 'isbn_match' | 'google_books_id';
+  score: number; // この理由による重複度スコア
+  details: string; // 人間が読める説明
+}
+
+// 重複検索のオプション
+export interface DuplicateSearchOptions {
+  minMatchScore?: number; // 最小重複スコア（デフォルト: 70）
+  includeExactOnly?: boolean; // 完全一致のみを含める（デフォルト: false）
+  maxResults?: number; // 最大結果数（デフォルト: 10）
+}
+
 // BookServiceクラス
+// 文字列類似度計算のユーティリティ関数
+class StringSimilarityUtils {
+  // Levenshtein距離ベースの類似度計算
+  static calculateSimilarity(str1: string, str2: string): number {
+    if (!str1 || !str2) return 0;
+    if (str1 === str2) return 100;
+
+    const s1 = str1.toLowerCase().trim();
+    const s2 = str2.toLowerCase().trim();
+    
+    if (s1 === s2) return 100;
+
+    // 短い文字列の長さ
+    const maxLen = Math.max(s1.length, s2.length);
+    if (maxLen === 0) return 100;
+
+    // Levenshtein距離を計算
+    const distance = this.levenshteinDistance(s1, s2);
+    
+    // 類似度を0-100のスケールに変換
+    return Math.round(((maxLen - distance) / maxLen) * 100);
+  }
+
+  // Levenshtein距離の計算
+  static levenshteinDistance(str1: string, str2: string): number {
+    const matrix = Array(str2.length + 1).fill(null).map(() => 
+      Array(str1.length + 1).fill(null)
+    );
+
+    for (let i = 0; i <= str1.length; i++) {
+      matrix[0][i] = i;
+    }
+
+    for (let j = 0; j <= str2.length; j++) {
+      matrix[j][0] = j;
+    }
+
+    for (let j = 1; j <= str2.length; j++) {
+      for (let i = 1; i <= str1.length; i++) {
+        const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1, // 挿入
+          matrix[j - 1][i] + 1, // 削除
+          matrix[j - 1][i - 1] + indicator // 置換
+        );
+      }
+    }
+
+    return matrix[str2.length][str1.length];
+  }
+
+  // 著者名の類似度をチェック（順序を考慮しない）
+  static checkAuthorSimilarity(authors1: string[], authors2: string[]): number {
+    if (!authors1.length || !authors2.length) return 0;
+
+    let totalScore = 0;
+    let comparisons = 0;
+
+    for (const author1 of authors1) {
+      let bestMatch = 0;
+      for (const author2 of authors2) {
+        const similarity = this.calculateSimilarity(author1, author2);
+        bestMatch = Math.max(bestMatch, similarity);
+      }
+      totalScore += bestMatch;
+      comparisons++;
+    }
+
+    return Math.round(totalScore / comparisons);
+  }
+
+  // ISBNの正規化（ハイフンなどを除去）
+  static normalizeISBN(isbn: string): string {
+    return isbn.replace(/[^\d]/g, '');
+  }
+}
+
 export class BookService {
   private userId: string;
   private supabase: SupabaseClient;
@@ -199,19 +296,144 @@ export class BookService {
   }
 
   // 重複チェック
+  // レガシー重複チェック（下位互換性のため保持）
   async checkDuplicate(title: string, authors: string[]): Promise<BookRow[]> {
-    const { data, error } = await this.supabase
-      .from('books')
-      .select('*')
-      .eq('user_id', this.userId)
-      .eq('title', title)
-      .contains('authors', authors);
+    const results = await this.findPotentialDuplicates({
+      title,
+      authors,
+      isbn10: undefined,
+      isbn13: undefined,
+      googleBooksId: undefined,
+    });
 
-    if (error) {
-      throw new Error(`重複チェックに失敗しました: ${error.message}`);
+    return results.map(result => result.book);
+  }
+
+  // 新しい包括的重複検索機能
+  async findPotentialDuplicates(
+    bookData: {
+      title: string;
+      authors: string[];
+      isbn10?: string;
+      isbn13?: string;
+      googleBooksId?: string;
+    },
+    options: DuplicateSearchOptions = {}
+  ): Promise<DuplicateSearchResult[]> {
+    const minMatchScore = options.minMatchScore || 70;
+    const maxResults = options.maxResults || 10;
+
+    try {
+      // 全ての所有本を取得
+      const { data: allBooks, error } = await this.supabase
+        .from('books')
+        .select('*')
+        .eq('user_id', this.userId);
+
+      if (error) {
+        throw new Error(`重複検索に失敗しました: ${error.message}`);
+      }
+
+      if (!allBooks || allBooks.length === 0) {
+        return [];
+      }
+
+      const duplicateResults: DuplicateSearchResult[] = [];
+
+      for (const book of allBooks) {
+        const matchReasons: DuplicateMatchReason[] = [];
+        let totalScore = 0;
+
+        // 1. Google Books ID での完全一致チェック
+        if (bookData.googleBooksId && book.google_books_id === bookData.googleBooksId) {
+          matchReasons.push({
+            type: 'google_books_id',
+            score: 100,
+            details: 'Google Books IDが完全一致'
+          });
+          totalScore = 100;
+        }
+
+        // 2. ISBN での完全一致チェック
+        if (bookData.isbn10 || bookData.isbn13) {
+          const normalizedInputISBN10 = bookData.isbn10 ? StringSimilarityUtils.normalizeISBN(bookData.isbn10) : '';
+          const normalizedInputISBN13 = bookData.isbn13 ? StringSimilarityUtils.normalizeISBN(bookData.isbn13) : '';
+          const normalizedBookISBN10 = book.isbn10 ? StringSimilarityUtils.normalizeISBN(book.isbn10) : '';
+          const normalizedBookISBN13 = book.isbn13 ? StringSimilarityUtils.normalizeISBN(book.isbn13) : '';
+
+          if ((normalizedInputISBN10 && normalizedInputISBN10 === normalizedBookISBN10) ||
+              (normalizedInputISBN13 && normalizedInputISBN13 === normalizedBookISBN13) ||
+              (normalizedInputISBN10 && normalizedInputISBN10 === normalizedBookISBN13) ||
+              (normalizedInputISBN13 && normalizedInputISBN13 === normalizedBookISBN10)) {
+            matchReasons.push({
+              type: 'isbn_match',
+              score: 95,
+              details: 'ISBNが完全一致'
+            });
+            totalScore = Math.max(totalScore, 95);
+          }
+        }
+
+        // Google Books IDやISBNでの完全一致がない場合のみ、タイトル・著者での類似度チェック
+        if (totalScore < 95) {
+          // 3. タイトルの類似度チェック
+          if (book.title) {
+            const titleSimilarity = StringSimilarityUtils.calculateSimilarity(bookData.title, book.title);
+            
+            if (titleSimilarity === 100) {
+              matchReasons.push({
+                type: 'title_exact',
+                score: titleSimilarity,
+                details: 'タイトルが完全一致'
+              });
+            } else if (titleSimilarity >= 75) {
+              matchReasons.push({
+                type: 'title_similarity',
+                score: titleSimilarity,
+                details: `タイトルが${titleSimilarity}%一致`
+              });
+            }
+
+            totalScore = Math.max(totalScore, titleSimilarity);
+          }
+
+          // 4. 著者の類似度チェック
+          if (book.authors && book.authors.length > 0 && bookData.authors.length > 0) {
+            const authorSimilarity = StringSimilarityUtils.checkAuthorSimilarity(bookData.authors, book.authors);
+            
+            if (authorSimilarity >= 80) {
+              matchReasons.push({
+                type: 'author_match',
+                score: authorSimilarity,
+                details: `著者が${authorSimilarity}%一致`
+              });
+
+              // タイトルと著者の両方が高い類似度の場合、重複度を上げる
+              if (totalScore >= 75 && authorSimilarity >= 80) {
+                totalScore = Math.min(100, totalScore + (authorSimilarity * 0.3));
+              }
+            }
+          }
+        }
+
+        // 重複スコアが閾値を超える場合、結果に追加
+        if (totalScore >= minMatchScore && matchReasons.length > 0) {
+          duplicateResults.push({
+            book,
+            matchScore: Math.round(totalScore),
+            matchReasons
+          });
+        }
+      }
+
+      // スコアの高い順にソートして、最大結果数まで返す
+      return duplicateResults
+        .sort((a, b) => b.matchScore - a.matchScore)
+        .slice(0, maxResults);
+
+    } catch (error) {
+      throw new Error(`重複検索中にエラーが発生しました: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-
-    return data || [];
   }
 
   // ISBN による検索
